@@ -280,6 +280,53 @@ P.bags = {
 			a = 1,
 		},
 	},
+	categorizedBags = {
+		enable = false,
+		itemSize = 36,
+		itemSpacingH = 4,
+		itemSpacingV = 4,
+		headerHeight = 22,
+		sidebarRowHeight = 24,
+		sectionSpacing = 14,
+		sidebarWidth = 170,
+		width = 600,
+		height = 600,
+		showPinned = true,
+		showRecent = true,
+		hideEmptyCategories = true,
+		alternatingRowBackground = true,
+		viewMode = "CATEGORY",
+		sidebarCollapsed = false,
+		disabledCategories = {},
+		categoryOrder = {},
+		userCategories = {},
+		itemAssignments = {},
+		pinnedItemsByChar = {},
+		itemCountFont = {
+			name = I.Fonts.Primary,
+			size = 12,
+			style = "OUTLINE",
+			position = "BOTTOMRIGHT",
+		},
+		itemLevel = {
+			enable = true,
+			font = {
+				name = I.Fonts.Primary,
+				size = 10,
+				style = "SHADOWOUTLINE",
+				position = "TOPLEFT",
+			},
+		},
+		itemInfo = {
+			enable = true,
+			font = {
+				name = I.Fonts.Primary,
+				size = 10,
+				style = "OUTLINE",
+				position = "BOTTOM",
+			},
+		},
+	},
 }
 
 P.colors = {
@@ -680,6 +727,9 @@ P.tooltip = {
 
 P.mail = {
 	enable = true,
+	selection = {
+		enable = true,
+	},
 }
 
 P.notification = {
@@ -1401,7 +1451,7 @@ P.lootRoll = {
 	enable = true,
 	growDirection = "DOWN", -- DOWN or UP
 	width = 270,
-	height = 56,
+	height = 50,
 	spacing = 8,
 	maxBars = 5,
 	buttonSize = 22,

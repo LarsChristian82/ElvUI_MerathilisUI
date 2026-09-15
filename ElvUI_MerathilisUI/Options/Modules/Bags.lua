@@ -1,6 +1,7 @@
 local MER, W, WF, F, E, I, V, P, G, L = unpack(ElvUI_MerathilisUI)
 local module = MER:GetModule("MER_Options") ---@class Options
 local EM = MER:GetModule("MER_EquipManager") ---@class EquipmentManager
+local BC = MER:GetModule("MER_BagCategories") ---@class BagCategories
 local B = E:GetModule("Bags")
 
 local options = module.options.modules.args
@@ -107,6 +108,333 @@ options.bags = {
 						-- B:UpdateAllBagSlots()
 						EM:UpdateItemDisplay()
 					end,
+				},
+			},
+		},
+		categorizedBags = {
+			order = 2,
+			type = "group",
+			name = L["Categorized Bags"],
+			guiInline = true,
+			get = function(info)
+				return E.db.mui.bags.categorizedBags[info[#info]]
+			end,
+			set = function(info, value)
+				E.db.mui.bags.categorizedBags[info[#info]] = value
+
+				if BC.frame then
+					BC.frame:Size(E.db.mui.bags.categorizedBags.width, E.db.mui.bags.categorizedBags.height)
+					BC:RefreshCategoryFrame()
+				end
+			end,
+			args = {
+				enable = {
+					order = 1,
+					type = "toggle",
+					name = L["Enable"],
+					desc = L["Replaces ElvUI's bag frame with a category-sidebar view (Pinned/Recent items, custom categories). Requires a UI reload to take effect."],
+					set = function(info, value)
+						E.db.mui.bags.categorizedBags[info[#info]] = value
+						E:StaticPopup_Show("PRIVATE_RL")
+					end,
+				},
+				hideEmptyCategories = {
+					order = 2,
+					type = "toggle",
+					name = L["Hide Empty Categories"],
+				},
+				showPinned = {
+					order = 3,
+					type = "toggle",
+					name = L["Show Pinned Items"],
+				},
+				showRecent = {
+					order = 4,
+					type = "toggle",
+					name = L["Show Recent Items"],
+				},
+				alternatingRowBackground = {
+					order = 4.5,
+					type = "toggle",
+					name = L["Alternating Row Background"],
+					desc = L["Shades every second sidebar category row, same as the Armory panel's alternating stat rows."],
+				},
+				resetCategoryGroups = {
+					order = 4.6,
+					type = "execute",
+					name = L["Reset Category Groups"],
+					desc = L["Restores any category group (e.g. \"The Armory\") you disbanded or removed a category from, and clears any group renames."],
+					func = function()
+						local db = BC.db
+						db.ungroupedCategories = nil
+						db.disbandedGroups = nil
+						db.groupNameOverrides = nil
+
+						BC:InvalidateCategoryCache()
+						if BC.frame then
+							BC:RefreshCategoryFrame()
+						end
+					end,
+				},
+				itemSize = {
+					order = 5,
+					type = "range",
+					name = L["Item Size"],
+					min = 24,
+					max = 48,
+					step = 1,
+				},
+				itemSpacingH = {
+					order = 6,
+					type = "range",
+					name = L["Item Spacing (Horizontal)"],
+					min = 0,
+					max = 10,
+					step = 1,
+				},
+				itemSpacingV = {
+					order = 7,
+					type = "range",
+					name = L["Item Spacing (Vertical)"],
+					min = 0,
+					max = 10,
+					step = 1,
+				},
+				sidebarWidth = {
+					order = 8,
+					type = "range",
+					name = L["Sidebar Width"],
+					min = 100,
+					max = 220,
+					step = 1,
+				},
+				sidebarRowHeight = {
+					order = 9,
+					type = "range",
+					name = L["Sidebar Row Height"],
+					min = 18,
+					max = 36,
+					step = 1,
+				},
+				headerHeight = {
+					order = 10,
+					type = "range",
+					name = L["Category Header Height"],
+					min = 16,
+					max = 32,
+					step = 1,
+				},
+				sectionSpacing = {
+					order = 11,
+					type = "range",
+					name = L["Spacing Between Categories"],
+					min = 0,
+					max = 32,
+					step = 1,
+				},
+				width = {
+					order = 12,
+					type = "range",
+					name = L["Width"],
+					min = 380,
+					max = 900,
+					step = 1,
+				},
+				height = {
+					order = 13,
+					type = "range",
+					name = L["Height"],
+					min = 300,
+					max = 800,
+					step = 1,
+				},
+				itemCountFont = {
+					order = 14,
+					type = "group",
+					inline = true,
+					name = L["Item Count"],
+					get = function(info)
+						return E.db.mui.bags.categorizedBags.itemCountFont[info[#info]]
+					end,
+					set = function(info, value)
+						E.db.mui.bags.categorizedBags.itemCountFont[info[#info]] = value
+						if BC.frame then
+							BC:RefreshCategoryFrame()
+						end
+					end,
+					args = {
+						name = {
+							order = 1,
+							type = "select",
+							dialogControl = "LSM30_Font",
+							name = L["Font"],
+							values = E.LSM:HashTable("font"),
+						},
+						style = {
+							order = 2,
+							type = "select",
+							name = L["Outline"],
+							values = MER.Values.FontFlags,
+							sortByValue = true,
+						},
+						size = {
+							order = 3,
+							type = "range",
+							name = L["Size"],
+							min = 6,
+							max = 24,
+							step = 1,
+						},
+						position = {
+							order = 4,
+							type = "select",
+							name = L["Position"],
+							values = I.Values.positionValues,
+						},
+					},
+				},
+				itemLevel = {
+					order = 15,
+					type = "group",
+					inline = true,
+					name = L["Item Level"],
+					get = function(info)
+						return E.db.mui.bags.categorizedBags.itemLevel[info[#info]]
+					end,
+					set = function(info, value)
+						E.db.mui.bags.categorizedBags.itemLevel[info[#info]] = value
+						if BC.frame then
+							BC:RefreshCategoryFrame()
+						end
+					end,
+					args = {
+						enable = {
+							order = 1,
+							type = "toggle",
+							name = L["Enable"],
+							width = "full",
+						},
+						font = {
+							order = 2,
+							type = "group",
+							inline = true,
+							name = L["Font"],
+							disabled = function()
+								return not E.db.mui.bags.categorizedBags.itemLevel.enable
+							end,
+							get = function(info)
+								return E.db.mui.bags.categorizedBags.itemLevel.font[info[#info]]
+							end,
+							set = function(info, value)
+								E.db.mui.bags.categorizedBags.itemLevel.font[info[#info]] = value
+								if BC.frame then
+									BC:RefreshCategoryFrame()
+								end
+							end,
+							args = {
+								name = {
+									order = 1,
+									type = "select",
+									dialogControl = "LSM30_Font",
+									name = L["Font"],
+									values = E.LSM:HashTable("font"),
+								},
+								style = {
+									order = 2,
+									type = "select",
+									name = L["Outline"],
+									values = MER.Values.FontFlags,
+									sortByValue = true,
+								},
+								size = {
+									order = 3,
+									type = "range",
+									name = L["Size"],
+									min = 6,
+									max = 24,
+									step = 1,
+								},
+								position = {
+									order = 4,
+									type = "select",
+									name = L["Position"],
+									values = I.Values.positionValues,
+								},
+							},
+						},
+					},
+				},
+				itemInfo = {
+					order = 16,
+					type = "group",
+					inline = true,
+					name = L["Item Info"],
+					get = function(info)
+						return E.db.mui.bags.categorizedBags.itemInfo[info[#info]]
+					end,
+					set = function(info, value)
+						E.db.mui.bags.categorizedBags.itemInfo[info[#info]] = value
+						if BC.frame then
+							BC:RefreshCategoryFrame()
+						end
+					end,
+					args = {
+						enable = {
+							order = 1,
+							type = "toggle",
+							name = L["Enable"],
+							desc = L["Shows a bind-type indicator (BoE, BoU, ...) on items that aren't bound yet."],
+							width = "full",
+						},
+						font = {
+							order = 2,
+							type = "group",
+							inline = true,
+							name = L["Font"],
+							disabled = function()
+								return not E.db.mui.bags.categorizedBags.itemInfo.enable
+							end,
+							get = function(info)
+								return E.db.mui.bags.categorizedBags.itemInfo.font[info[#info]]
+							end,
+							set = function(info, value)
+								E.db.mui.bags.categorizedBags.itemInfo.font[info[#info]] = value
+								if BC.frame then
+									BC:RefreshCategoryFrame()
+								end
+							end,
+							args = {
+								name = {
+									order = 1,
+									type = "select",
+									dialogControl = "LSM30_Font",
+									name = L["Font"],
+									values = E.LSM:HashTable("font"),
+								},
+								style = {
+									order = 2,
+									type = "select",
+									name = L["Outline"],
+									values = MER.Values.FontFlags,
+									sortByValue = true,
+								},
+								size = {
+									order = 3,
+									type = "range",
+									name = L["Size"],
+									min = 6,
+									max = 24,
+									step = 1,
+								},
+								position = {
+									order = 4,
+									type = "select",
+									name = L["Position"],
+									values = I.Values.positionValues,
+								},
+							},
+						},
+					},
 				},
 			},
 		},
