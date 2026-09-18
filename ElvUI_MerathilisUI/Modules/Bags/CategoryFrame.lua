@@ -1,6 +1,7 @@
 local MER, W, WF, F, E, I, V, P, G, L = unpack(ElvUI_MerathilisUI)
 local module = MER:GetModule("MER_BagCategories") ---@class BagCategories
 local B = E:GetModule("Bags")
+local TT = E:GetModule("Tooltip")
 local S = E:GetModule("Skins")
 local WS = W:GetModule("Skins")
 local EM = MER:GetModule("MER_EquipManager") ---@class EquipmentManager
@@ -162,25 +163,105 @@ local function SnapshotBankNewItems()
 	SnapshotNewItemsForBags(module.WarbandBagIDs)
 end
 
+-- B.BagFrame:Hide() for real is exactly what we want here - it makes the
+-- whole subtree (every child button/slot) unreachable and invisible in one
+-- step, and correctly flips IsShown() to false for anything elsewhere that
+-- checks "is the bag frame actually open" (see below for why that matters).
+-- The one thing we must avoid is its OnHide handler (Container_OnHide)
+-- actually running: it calls CloseBackpack()/CloseBag() as a side effect,
+-- which resets the native "bags are open" state ElvUI's own toggle handlers
+-- read on the next press of the bag keybind - since our frame is what's
+-- actually open at that point, that reset made every subsequent press
+-- decide to "open" again instead of alternating (the keybind stopped
+-- closing anything). Fix: clear the OnHide script right before :Hide(),
+-- restore it right after - a real close (B:CloseAllBags(), never routed
+-- through this function) still runs Container_OnHide normally.
+--
+-- Two earlier attempts got this wrong by never actually calling :Hide():
+-- SetAlpha(0)/EnableMouse(false) on the frame itself doesn't stop its
+-- children from staying clickable (an invisible child button was eating
+-- clicks meant for our own sidebar's collapse arrow), and moving the frame
+-- off-screen instead fixed clicks but left IsShown() reporting true - which
+-- broke anything that anchors itself to B.BagFrame while it's "open":
+-- reported as tooltips (and apparently the Plumber addon's own frame)
+-- pinning to the screen's left edge, traced to ElvUI's own "anchor tooltip
+-- to bags" option (Tooltip.lua's GameTooltip_SetDefaultAnchor) anchoring
+-- the global GameTooltip to B.BagFrame's position - which was real, just
+-- sitting off-screen - once it saw IsShown() == true.
 local function HideElvUIBagFrame()
 	if B.BagFrame and B.BagFrame:IsShown() then
 		SnapshotNewItems()
+
+		local onHide = B.BagFrame:GetScript("OnHide")
+		B.BagFrame:SetScript("OnHide", nil)
 		B.BagFrame:Hide()
+		B.BagFrame:SetScript("OnHide", onHide)
 	end
 end
 
--- Unlike HideElvUIBagFrame, this must NOT call B.BankFrame:Hide() - ElvUI's
+-- Same technique as HideElvUIBagFrame above, doubly important here: ElvUI's
 -- shared Container_OnHide handler calls CloseBankFrame() as a side effect
 -- for any frame with isBank=true, which would immediately end the real
--- server-side bank interaction. Just make it invisible/non-interactive
--- instead; module:OnFrameHidden() is responsible for actually closing the
--- bank via CloseBankFrame() when appropriate.
+-- server-side bank interaction if it ran for real - suppressing OnHide
+-- around the :Hide() call avoids that while still getting a real, correct
+-- IsShown() == false. module:OnFrameHidden() is responsible for actually
+-- closing the bank via CloseBankFrame() when appropriate.
 local function HideElvUIBankFrame()
 	if B.BankFrame and B.BankFrame:IsShown() then
 		SnapshotBankNewItems()
-		B.BankFrame:SetAlpha(0)
-		B.BankFrame:EnableMouse(false)
+
+		local onHide = B.BankFrame:GetScript("OnHide")
+		B.BankFrame:SetScript("OnHide", nil)
+		B.BankFrame:Hide()
+		B.BankFrame:SetScript("OnHide", onHide)
 	end
+end
+
+-- ElvUI's "Anchor Tooltip to Bags" option (Options > ElvUI > Tooltip) only
+-- knows about B.BagFrame - since that's now always hidden while our frame is
+-- up (see HideElvUIBagFrame above), ElvUI's own default-anchor logic falls
+-- through to its generic screen-quadrant fallback instead, which is what
+-- was reported as tooltips popping up in the middle of the screen instead
+-- of tucked above the bag window like ElvUI users are used to. Blizzard's
+-- GameTooltip_SetDefaultAnchor is a plain global function called from all
+-- over the place (unit frames, action bars, ElvUI's own bag frame, ...)
+-- whenever something wants a tooltip positioned "wherever the user's
+-- default is" rather than somewhere explicit - ElvUI itself hooks this same
+-- global (see its Tooltip.lua) to layer its own anchor-to-bags/quadrant
+-- logic on top of Blizzard's plain default. Hooking it here too (after
+-- ElvUI's own hook already ran) lets us override its result with our own
+-- frame as the anchor target, using the exact same math and the user's own
+-- ElvUI tooltip settings, instead of duplicating that whole system.
+--
+-- Doesn't affect our own item-slot tooltips (Slot_OnEnter) - those call
+-- GameTooltip:SetOwner(self, "ANCHOR_RIGHT") directly and never go through
+-- this function at all.
+function module:OnGameTooltipDefaultAnchor(tt)
+	local db = TT.db
+	if not tt or tt:IsForbidden() or not E.private.tooltip.enable or not db or db.cursorAnchor then
+		return
+	end
+
+	-- Anchor wasn't left at the default by ElvUI's own hook (e.g. combat/
+	-- action-bar visibility rules hid it, or something set an explicit
+	-- anchor of its own) - leave it alone rather than second-guessing that.
+	if tt:GetAnchorType() ~= "ANCHOR_NONE" then
+		return
+	end
+
+	local anchorBags = db.anchorToBags
+	if not anchorBags or anchorBags == "DISABLED" then
+		return
+	end
+
+	local anchorFrame = (module.frame and module.frame:IsShown() and module.frame)
+		or (module.bankFrame and module.bankFrame:IsShown() and module.bankFrame)
+	if not anchorFrame then
+		return
+	end
+
+	tt:ClearAllPoints()
+	tt:Point(E.InversePoints[anchorBags], anchorFrame, anchorBags, db.xOffset, db.yOffset)
 end
 
 -- Reskins a scrollbar to a thin, track-less thumb: HandleScrollBar's own
@@ -553,6 +634,14 @@ local function CreateSlotPoolFor(namePrefix, getContentChild, getOwnerFrame)
 	-- Slot_OnEnter needs to bump the frame level of whichever top-level frame
 	-- (bags or bank) this particular button actually belongs to.
 	btn.ownerFrame = getOwnerFrame()
+
+	-- Same numeric cooldown-text/swipe-color treatment ElvUI's own bag slots
+	-- get, driven by the user's existing ElvUI > Cooldown > Bags settings.
+	-- RegisterCooldown is required, not automatic - ElvUI only applies its
+	-- cooldown text to frames it knows about.
+	if btn.Cooldown then
+		E:RegisterCooldown(btn.Cooldown, "bags")
+	end
 
 		return btn
 	end
@@ -1202,14 +1291,27 @@ function module:ConstructFrame()
 	-- we don't have ElvUI's own separate animated Stack/Compress algorithm,
 	-- so both buttons call the same native sort for now.
 	f.sortButton = CreateTitleButton("SortButton", E.Media.Textures.PetBroom, L["Sort Bags"], function()
+		module:StartSortSpinner()
 		C_Container.SortBags()
 	end)
 	f.sortButton:Point("TOPRIGHT", f, "TOPRIGHT", -40, -8)
 
 	f.stackButton = CreateTitleButton("StackButton", E.Media.Textures.Planks, L["Stack Items In Bags"], function()
+		module:StartSortSpinner()
 		C_Container.SortBags()
 	end)
 	f.stackButton:Point("TOPRIGHT", f.sortButton, "TOPLEFT", -2, 0)
+
+	-- Same spinner ElvUI's own bag frame shows while its custom sort
+	-- algorithm is moving items - we don't have that algorithm (SortBags()
+	-- above is Blizzard's native, near-instant one), but showing this while
+	-- waiting for the resulting BAG_UPDATE burst to settle gives the same
+	-- "something is happening" feedback instead of items just silently
+	-- rearranging. Sized/colored per module.db.spinner in StartSortSpinner.
+	f.spinnerIcon = CreateFrame("Frame", nil, f)
+	f.spinnerIcon:Size(80, 80)
+	f.spinnerIcon:Point("CENTER")
+	f.spinnerIcon:Hide()
 
 	f.vendorGraysButton = CreateTitleButton("VendorGraysButton", 133784, function()
 		local value = module:GetJunkValue()
@@ -1337,8 +1439,13 @@ function module:ConstructFrame()
 		row.text = row:CreateFontString(nil, "OVERLAY")
 		row.text:FontTemplate()
 		row.text:Point("LEFT", row.icon, "RIGHT", 6, 0)
+		row.text:Point("RIGHT", -26, 0)
 		row.text:SetJustifyH("LEFT")
 		row.text:SetText(def.label)
+
+		row.count = row:CreateFontString(nil, "OVERLAY")
+		row.count:FontTemplate()
+		row.count:Point("RIGHT", -4, 0)
 
 		row.viewModeKey = def.key
 		row:SetScript("OnClick", function()
@@ -1346,6 +1453,8 @@ function module:ConstructFrame()
 			module:RefreshCategoryFrame()
 			module:RefreshBagBarPopout()
 		end)
+		row:SetScript("OnEnter", Sidebar_OnEnter)
+		row:SetScript("OnLeave", Sidebar_OnLeave)
 
 		f.viewModeRows[i] = row
 	end
@@ -1681,7 +1790,8 @@ function module:AutoDepositToBank()
 		return
 	end
 
-	local bankType = module.bankViewMode == "WARBAND_ALL" and WARBAND_BANK_TYPE or CHARACTER_BANK_TYPE
+	local isWarbandView = module.bankViewMode == "WARBAND_ALL" or module.bankViewMode == "ONEWARBAND"
+	local bankType = isWarbandView and WARBAND_BANK_TYPE or CHARACTER_BANK_TYPE
 	AutoDepositItemsIntoBank(bankType)
 end
 
@@ -1902,32 +2012,9 @@ local function CollectItems()
 	return CollectItemsFromBags(BAG_IDS, categoryItemsScratch)
 end
 
-local bankCategoryItemsScratch = {}
--- Set via the Bag Bar popout while in Bank mode (click a tab to filter the
--- category view down to just that tab's items, click again to clear).
-local function CollectBankItems()
-	local bagIDList = module.BankBagIDs
-	if module.bankTabFilter then
-		bagIDList = { module.bankTabFilter }
-	end
-	return CollectItemsFromBags(bagIDList, bankCategoryItemsScratch)
-end
-
-local warbandCategoryItemsScratch = {}
--- Same tab-filter field as the character bank above - only one of the two
--- bank-like view modes is ever active at once, so it's cleared on every
--- view-mode switch away from BANK/WARBAND (see the view-mode row OnClick).
-local function CollectWarbandItems()
-	local bagIDList = module.WarbandBagIDs
-	if module.bankTabFilter then
-		bagIDList = { module.bankTabFilter }
-	end
-	return CollectItemsFromBags(bagIDList, warbandCategoryItemsScratch)
-end
-
-local function BuildCategorySectionsFrom(itemsByCategory, context)
+local function BuildCategorySectionsFrom(itemsByCategory)
 	local db = module.db
-	local categories = module:GetCategories(context)
+	local categories = module:GetCategories()
 	local sections = {}
 
 	if db.showPinned then
@@ -2056,14 +2143,6 @@ end
 
 local function BuildCategorySections()
 	return BuildCategorySectionsFrom(CollectItems())
-end
-
-local function BuildBankCategorySections()
-	return BuildCategorySectionsFrom(CollectBankItems(), "bank")
-end
-
-local function BuildWarbandCategorySections()
-	return BuildCategorySectionsFrom(CollectWarbandItems(), "bank")
 end
 
 -------------------------------------------------------------------------------
@@ -2323,15 +2402,24 @@ function module:ToggleBagBarPopout()
 	f:Show()
 end
 
-local function BuildBagSections()
+-- alwaysShow bypasses hideEmptyCategories for the per-bag sections only
+-- (Pinned/Recent still respect it) - the bank frame's tab view wants every
+-- purchased tab listed even when empty, since a physical tab's identity
+-- doesn't depend on its current contents the way a soft category's does.
+-- skipSidebarRows marks each bag section so RenderCategorySections doesn't
+-- also give it a row in the scrollable sidebar - the bank frame already has
+-- its own fixed per-tab rows for that (see BankFrame.lua), so a second,
+-- scroll-to-section row per tab would just be a confusing duplicate; the
+-- regular bag frame's own MultiBag mode has no such fixed rows and still
+-- wants them, so it's an opt-in flag rather than the default.
+local function BuildBagSectionsFrom(bagIDList, itemsByBag, alwaysShow, skipSidebarRows)
 	local db = module.db
-	local itemsByBag = CollectItemsByBag()
 	local sections = {}
 
 	-- Pinned/Recent stay useful (and stay at the top) regardless of grouping.
 	if db.showPinned then
 		local pinned = {}
-		for _, bagID in ipairs(BAG_IDS) do
+		for _, bagID in ipairs(bagIDList) do
 			for _, entry in ipairs(itemsByBag[bagID] or {}) do
 				if module:IsItemPinned(entry.itemID) then
 					tinsert(pinned, entry)
@@ -2352,7 +2440,7 @@ local function BuildBagSections()
 
 	if db.showRecent then
 		local recent = {}
-		for _, bagID in ipairs(BAG_IDS) do
+		for _, bagID in ipairs(bagIDList) do
 			for _, entry in ipairs(itemsByBag[bagID] or {}) do
 				if entry.isNew then
 					tinsert(recent, entry)
@@ -2372,20 +2460,25 @@ local function BuildBagSections()
 		end
 	end
 
-	for _, bagID in ipairs(BAG_IDS) do
+	for _, bagID in ipairs(bagIDList) do
 		local items = itemsByBag[bagID] or {}
-		if #items > 0 or not db.hideEmptyCategories then
+		if alwaysShow or #items > 0 or not db.hideEmptyCategories then
 			tinsert(sections, {
 				key = "BAG_" .. bagID,
 				name = GetBagDisplayName(bagID),
 				icon = GetBagIcon(bagID),
 				isBagSection = true,
+				skipSidebarRow = skipSidebarRows or nil,
 				items = items,
 			})
 		end
 	end
 
 	return sections
+end
+
+local function BuildBagSections()
+	return BuildBagSectionsFrom(BAG_IDS, CollectItemsByBag())
 end
 
 -------------------------------------------------------------------------------
@@ -2519,7 +2612,7 @@ end
 -- WHICH fixed rows sit above this (bag's ALL/CATEGORY/BAG switcher vs the
 -- bank's tab list) stays specific to each frame and lives outside this
 -- function; this only ever draws sections already built by BuildSections()/
--- BuildBankCategorySections()/etc into ctx.contentChild/ctx.sidebarChild.
+-- the bank frame's own tab-section builder into ctx.contentChild/ctx.sidebarChild.
 --
 -- ctx fields: contentChild, sidebarChild, pools (from CreatePoolSet),
 -- pinnedRow, offsets (the table to record each section's scroll offset
@@ -2579,10 +2672,11 @@ local function RenderCategorySections(ctx, sections)
 		-- Pinned Items has its own fixed shortcut row above the scrollable
 		-- list (see ConstructFrame/ConstructBankFrame), so it's excluded from
 		-- the scrollable sidebar rows here - only its content header/items
-		-- still render.
+		-- still render. skipSidebarRow (bank tab sections) is the same idea:
+		-- a fixed row already exists elsewhere for it.
 		if section.key == module.PinnedCategory.key then
 			ctx.pinnedRow.count:SetText(#section.items)
-		else
+		elseif not section.skipSidebarRow then
 			sidebarIndex = sidebarIndex + 1
 			-- Bag sections aren't reorderable either (no persisted "bag order"
 			-- concept, and physical bags aren't user-defined categories).
@@ -2712,11 +2806,27 @@ function module:RefreshCategoryFrame()
 	f.sidebar:Width(sidebarWidth)
 	f.addCategoryButton:SetShown(not db.sidebarCollapsed)
 
+	local totalSlots, usedSlots = 0, 0
+	for _, bagID in ipairs(BAG_IDS) do
+		local numSlots = C_Container_GetContainerNumSlots(bagID)
+		totalSlots = totalSlots + numSlots
+		for slotID = 1, numSlots do
+			local info = C_Container_GetContainerItemInfo(bagID, slotID)
+			if info and info.iconFileID then
+				usedSlots = usedSlots + 1
+			end
+		end
+	end
+
 	-- Fixed 3-row ALL/CATEGORY/BAG switcher - always all visible now that
 	-- Bank/Warband moved to their own separate frame, so (unlike before) this
 	-- never needs to reposition rows around a variable visible-row count.
+	-- All three modes just rearrange the SAME items, so they all show the
+	-- same total item count next to them.
 	for _, row in ipairs(f.viewModeRows) do
 		row.text:SetShown(not db.sidebarCollapsed)
+		row.count:SetShown(not db.sidebarCollapsed)
+		row.count:SetText(usedSlots)
 		local isSelected = row.viewModeKey == db.viewMode
 		row.selectedTex:SetShown(isSelected)
 		row.selectedBar:SetShown(isSelected)
@@ -2761,17 +2871,6 @@ function module:RefreshCategoryFrame()
 		end,
 	}, sections)
 
-	local totalSlots, usedSlots = 0, 0
-	for _, bagID in ipairs(BAG_IDS) do
-		local numSlots = C_Container_GetContainerNumSlots(bagID)
-		totalSlots = totalSlots + numSlots
-		for slotID = 1, numSlots do
-			local info = C_Container_GetContainerItemInfo(bagID, slotID)
-			if info and info.iconFileID then
-				usedSlots = usedSlots + 1
-			end
-		end
-	end
 	f.titleText:SetText(L["Inventory"])
 	f.titleCountText:SetText(format("%d / %d %s", usedSlots, totalSlots, L["Items"]))
 
@@ -3190,11 +3289,10 @@ function module:OpenAssignMenu(slot)
 
 	local itemID = slot.itemID
 	local ownerFrame = slot.ownerFrame
-	local context = ownerFrame == module.bankFrame and "bank" or nil
 	_G.MenuUtil.CreateContextMenu(slot, function(_, rootDescription)
 		rootDescription:CreateTitle(L["Assign to Category"])
 
-		for _, cat in ipairs(module:GetCategories(context)) do
+		for _, cat in ipairs(module:GetCategories()) do
 			if not cat.isReagentBag then
 				rootDescription:CreateButton(cat.name, function()
 					module:AssignItemToCategory(itemID, cat.key)
@@ -3352,35 +3450,26 @@ function module:OnFrameHidden()
 	PlaySound(SOUNDKIT.IG_BACKPACK_CLOSE or 863)
 end
 
-function module:ToggleCategoryFrame()
-	if module.frame and module.frame:IsShown() then
-		module:HideCategoryFrame()
-	else
-		module:ShowCategoryFrame()
-	end
-end
-
--- Combat-guarded here too (see ShowCategoryFrame): without it we'd still
--- hide B.BagFrame below and then no-op on our own frame, leaving no bag
--- frame visible at all until combat ends.
-function module:ToggleAllBags()
+-- Every ElvUI bag-opening path - the plain keybind (ToggleBackpack/
+-- ToggleAllBags/ToggleBag), the mail/vendor auto-open (OpenAllBags(frame)),
+-- its "Auto Toggle" option (auction house/trade/professions/soulbind forge,
+-- B:AutoToggleFunction) and its guild bank auto-open (B:GuildBankShow) - all
+-- funnel through B:OpenBags()/B:CloseAllBags() to actually show/hide
+-- B.BagFrame (see ElvUI's Bags.lua). Hooking those two directly, instead of
+-- every individual entry point above them, covers all of those contexts from
+-- one place with no risk of firing twice for the same user action.
+--
+-- (Two earlier attempts got this wrong: hooking the native global
+-- ToggleAllBags/ToggleBackpack/OpenAllBags/CloseAllBags in addition to
+-- B:OpenBags()/B:CloseAllBags() double-fired on a plain keybind press - the
+-- native hook and the nested B:OpenBags() call it triggers both ran - and
+-- toggled our frame shut again right after opening it. Hooking
+-- B:AutoToggleFunction directly instead didn't fire at all: AceEvent
+-- captures that function by value when registering its triggering events,
+-- before our hook wraps it, so the wrapped version is never what actually
+-- gets called.)
+function module:OnElvUIBagsOpened()
 	if InCombatLockdown() then
-		return
-	end
-
-	HideElvUIBagFrame()
-	module:ToggleCategoryFrame()
-end
-
-function module:ToggleBackpack()
-	module:ToggleAllBags()
-end
-
-function module:OpenAllBags(frame)
-	-- Only take over if ElvUI's own auto-toggle logic actually decided to open
-	-- (it already ran by the time this hook fires); this keeps its per-context
-	-- (mail/vendor) auto-open settings authoritative instead of duplicating them.
-	if InCombatLockdown() or not frame or not (B.BagFrame and B.BagFrame:IsShown()) then
 		return
 	end
 
@@ -3388,7 +3477,7 @@ function module:OpenAllBags(frame)
 	module:ShowCategoryFrame()
 end
 
-function module:CloseAllBags()
+function module:OnElvUIBagsClosed()
 	if InCombatLockdown() then
 		return
 	end
@@ -3458,20 +3547,83 @@ function module:OnBankTabsChanged()
 	end
 end
 
+-- Sort/Stack call Blizzard's native SortBags() (see ConstructFrame), which
+-- has no "finished" signal of its own - just a burst of BAG_UPDATE/
+-- BAG_UPDATE_DELAYED events as items settle. Generation counter debounce:
+-- every refresh received while sortingBags is set reschedules the stop:
+-- StopSortSpinner only actually stops it once 0.4s pass with no further
+-- refresh, so the spinner spans the whole burst instead of blinking off
+-- after the first event in it.
+local sortSpinnerGeneration = 0
+
+local function StopSortSpinner(generation)
+	if generation ~= sortSpinnerGeneration then
+		return
+	end
+
+	module.sortingBags = nil
+	if module.frame and module.frame.spinnerIcon then
+		E:StopSpinner(module.frame.spinnerIcon)
+	end
+end
+
+function module:PokeSortSpinner()
+	sortSpinnerGeneration = sortSpinnerGeneration + 1
+	E:Delay(0.4, StopSortSpinner, sortSpinnerGeneration)
+end
+
+function module:StartSortSpinner()
+	local db = module.db.spinner
+	if not (db and db.enable and module.frame and module.frame.spinnerIcon) then
+		return
+	end
+
+	module.sortingBags = true
+	E:StartSpinner(module.frame.spinnerIcon, nil, nil, nil, nil, db.size, db.color.r, db.color.g, db.color.b)
+	module:PokeSortSpinner()
+end
+
 local eventFrame = CreateFrame("Frame")
 local BAG_REFRESH_EVENTS = { "BAG_UPDATE", "BAG_UPDATE_DELAYED", "ITEM_LOCK_CHANGED", "EQUIPMENT_SETS_CHANGED" }
+
+-- RefreshCategoryFrame()/RefreshBankCategoryFrame() are full rebuilds (every
+-- item re-classified into its category, every pooled header/sub-header/slot/
+-- sidebar-row re-laid-out) - fine at the cost of one of those per discrete
+-- pickup/drop, but ITEM_LOCK_CHANGED and BAG_UPDATE both fire once per slot
+-- touched, not once per user action. A native SortBags() on a fuller
+-- inventory moves dozens of slots, so this handler used to run a full
+-- rebuild for each one of those, back to back, in the same burst of events -
+-- reported as the whole game freezing for several seconds after clicking
+-- Sort. Throttled to at most one rebuild per 0.15s (imperceptible for the
+-- single-item case, but collapses a same-frame burst of N events into 1
+-- rebuild instead of N) via a pending-flag + E:Delay, the same debounce
+-- technique StartSortSpinner/PokeSortSpinner already use above.
+local refreshPending = false
 
 -- Bag and Bank/Warband are two independent frames that can both be open at
 -- once (see OnBankOpened's auto-open), each refreshed off the same handful
 -- of events - route to whichever ones are actually shown right now instead
 -- of assuming there's only ever one.
-eventFrame:SetScript("OnEvent", function()
+local function DoThrottledRefresh()
+	refreshPending = false
+
 	if module.frame and module.frame:IsShown() then
 		module:RefreshCategoryFrame()
 	end
 
 	if module.bankFrame and module.bankFrame:IsShown() and module.RefreshBankCategoryFrame then
 		module:RefreshBankCategoryFrame()
+	end
+end
+
+eventFrame:SetScript("OnEvent", function()
+	if module.sortingBags then
+		module:PokeSortSpinner()
+	end
+
+	if not refreshPending then
+		refreshPending = true
+		E:Delay(0.15, DoThrottledRefresh)
 	end
 end)
 
@@ -3519,10 +3671,9 @@ function module:Initialize()
 	module.searchText = ""
 	module.bankViewMode = module.bankViewMode or "BANK_ALL"
 
-	module:SecureHook("ToggleAllBags")
-	module:SecureHook("ToggleBackpack")
-	module:SecureHook("OpenAllBags")
-	module:SecureHook("CloseAllBags")
+	module:SecureHook(B, "OpenBags", "OnElvUIBagsOpened")
+	module:SecureHook(B, "CloseAllBags", "OnElvUIBagsClosed")
+	module:SecureHook("GameTooltip_SetDefaultAnchor", "OnGameTooltipDefaultAnchor")
 
 	if #module.BankBagIDs > 0 or #module.WarbandBagIDs > 0 then
 		module:RegisterEvent("BANKFRAME_OPENED", "OnBankOpened")
@@ -3557,8 +3708,9 @@ end
 -- CHARACTER_BANK_TYPE or the C_Bank.* functions aren't real logic, so
 -- BankFrame.lua just redeclares those itself rather than routing them
 -- through here too).
-module.BuildBankCategorySections = BuildBankCategorySections
-module.BuildWarbandCategorySections = BuildWarbandCategorySections
+module.CollectItemsByBagFrom = CollectItemsByBagFrom
+module.BuildFlatSectionsFrom = BuildFlatSectionsFrom
+module.BuildBagSectionsFrom = BuildBagSectionsFrom
 module.GetBagIcon = GetBagIcon
 module.GetBagDisplayName = GetBagDisplayName
 module.ShowPurchaseBankTabPrompt = ShowPurchaseBankTabPrompt
