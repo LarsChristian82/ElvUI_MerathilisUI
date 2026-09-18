@@ -34,6 +34,8 @@ local GetBagIcon = module.GetBagIcon
 local GetBagDisplayName = module.GetBagDisplayName
 local ShowPurchaseBankTabPrompt = module.ShowPurchaseBankTabPrompt
 local SetCategoryIcon = module.SetCategoryIcon
+local SetTitleCount = module.SetTitleCount
+local CountSearchHits = module.CountSearchHits
 local SkinScrollBar = module.SkinScrollBar
 local VIEW_MODE_ROW_HEIGHT = module.VIEW_MODE_ROW_HEIGHT
 local COLLAPSED_SIDEBAR_WIDTH = module.COLLAPSED_SIDEBAR_WIDTH
@@ -54,6 +56,10 @@ local function CreateTitleButton(f, name, texture, tooltipText, onClick)
 	btn:Size(20)
 	pcall(btn.SetTemplate, btn)
 	pcall(btn.StyleButton, btn, nil, true)
+	if btn.hover then
+		local cc = E.myClassColor
+		btn.hover:SetColorTexture(cc.r, cc.g, cc.b, 0.3)
+	end
 
 	btn.tex = btn:CreateTexture(nil, "OVERLAY")
 	btn.tex:SetInside()
@@ -239,6 +245,7 @@ local function CreateBankSidebarRowButton(parent)
 
 	row.count = row:CreateFontString(nil, "OVERLAY")
 	row.count:FontTemplate()
+	row.count:SetTextColor(0.6, 0.6, 0.6)
 	row.count:Point("RIGHT", -4, 0)
 
 	row:SetScript("OnClick", BankTabRow_OnClick)
@@ -263,6 +270,9 @@ function module:ConstructBankFrame()
 	pcall(f.SetTemplate, f, "Transparent")
 	WS:CreateShadow(f)
 	f:Hide()
+	f:SetScript("OnShow", function(self)
+		module:FadeInFrame(self)
+	end)
 	f:SetScript("OnHide", function()
 		module:OnBankFrameHidden()
 	end)
@@ -397,6 +407,7 @@ function module:ConstructBankFrame()
 
 	f.pinnedRow.count = f.pinnedRow:CreateFontString(nil, "OVERLAY")
 	f.pinnedRow.count:FontTemplate()
+	f.pinnedRow.count:SetTextColor(0.6, 0.6, 0.6)
 	f.pinnedRow.count:Point("RIGHT", -4, 0)
 
 	f.pinnedRow:SetScript("OnClick", function()
@@ -447,6 +458,15 @@ function module:ConstructBankFrame()
 	f.contentChild:Height(1)
 	f.mainScroll:SetScrollChild(f.contentChild)
 	module.bankContentChild = f.contentChild
+
+	-- Shown when a search/tab filter leaves nothing to display - see the bag
+	-- frame's own f.emptyText for why this is parented to the scroll frame.
+	f.emptyText = f.mainScroll:CreateFontString(nil, "OVERLAY")
+	f.emptyText:FontTemplate(nil, 14)
+	f.emptyText:SetTextColor(0.6, 0.6, 0.6)
+	f.emptyText:Point("CENTER")
+	f.emptyText:SetText(L["No items found."])
+	f.emptyText:Hide()
 
 	-- Footer: player gold (left) / Warband gold (right), Withdraw/Deposit
 	-- buttons for Warband gold transfer, and a center Auto Deposit button
@@ -818,6 +838,7 @@ function module:RefreshBankCategoryFrame()
 		width = db.bankWidth,
 		sidebarWidth = sidebarWidth,
 		sidebarBaseY = tabY,
+		emptyText = f.emptyText,
 		refresh = function()
 			module:RefreshBankCategoryFrame()
 		end,
@@ -831,7 +852,12 @@ function module:RefreshBankCategoryFrame()
 		totalSlots = totalSlots + C_Container_GetContainerNumSlots(bagID)
 	end
 	f.titleText:SetText(isWarbandView and L["Warband Bank"] or L["Bank"])
-	f.titleCountText:SetText(format("%d / %d %s", usedSlots, totalSlots, L["Items"]))
+	SetTitleCount(
+		f.titleCountText,
+		usedSlots,
+		totalSlots,
+		CountSearchHits(module.bankTabFilter and { module.bankTabFilter } or countBagIDs)
+	)
 
 	module:UpdateBankFooter()
 end
@@ -850,6 +876,9 @@ function module:ShowBankFrame()
 	module:ConstructBankFrame()
 
 	module.bankFrame:Show()
+	if module.bankFrame.fadingOut then
+		module:FadeInFrame(module.bankFrame)
+	end
 	module:RegisterBagEventsFor("bank")
 	module:RefreshBankCategoryFrame()
 end
@@ -860,7 +889,7 @@ function module:HideBankFrame()
 	end
 
 	if module.bankFrame and module.bankFrame:IsShown() then
-		module.bankFrame:Hide()
+		module:FadeOutHide(module.bankFrame)
 	end
 end
 
@@ -881,5 +910,9 @@ function module:OnBankFrameHidden()
 	-- hidden while a bank interaction might still be open.
 	if module.isBankOpen and CloseBankFrame then
 		CloseBankFrame()
+	end
+
+	if module.bankFrame.NewItemGlow then
+		module.bankFrame.NewItemGlow:Stop()
 	end
 end

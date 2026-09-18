@@ -18,8 +18,11 @@ local IsControlKeyDown = IsControlKeyDown
 local IsModifiedClick = IsModifiedClick
 local HandleModifiedItemClick = HandleModifiedItemClick
 local CursorHasItem = CursorHasItem
+local GetCursorInfo = GetCursorInfo
+local ClearCursor = ClearCursor
 
 local CreateFrame = CreateFrame
+local CreateAnimationGroup = CreateAnimationGroup
 local GetMoney = GetMoney
 local CloseBankFrame = (C_Bank and C_Bank.CloseBankFrame) or CloseBankFrame
 local FetchPurchasedBankTabData = C_Bank and C_Bank.FetchPurchasedBankTabData
@@ -268,11 +271,69 @@ end
 -- thumbX narrows the thumb via an inset (same technique as the options-page
 -- scrollbar, Options/Widgets/ScrollBar.lua), and the separate track backdrop
 -- it creates behind the thumb gets hidden outright instead of just inset.
+-- ElvUI's own scrollbar skin re-applies its generic accent color
+-- (E.media.rgbvaluecolor) on every SetMinMaxValues call (i.e. on every
+-- content refresh) via its own ThumbStatus watcher - hook the same event
+-- ourselves, after it runs, to recolor the thumb class-colored instead,
+-- matching the rest of our class-colored accents (header divider,
+-- placeholder "+", selected/pinned sidebar rows).
+local function TintScrollThumb(scrollbar)
+	if scrollbar.Thumb and scrollbar.Thumb.backdrop and scrollbar:IsEnabled() and select(2, scrollbar:GetMinMaxValues()) ~= 0 then
+		local cc = E.myClassColor
+		scrollbar.Thumb.backdrop:SetBackdropColor(cc.r, cc.g, cc.b)
+	end
+end
+
 local function SkinScrollBar(scrollbar)
 	local ok = pcall(S.HandleScrollBar, S, scrollbar, nil, 4)
 	if ok and scrollbar.backdrop then
 		scrollbar.backdrop:Hide()
 	end
+
+	hooksecurefunc(scrollbar, "SetMinMaxValues", TintScrollThumb)
+	TintScrollThumb(scrollbar)
+end
+
+-- Tints the title's "used / total" counter as the container fills up, so a
+-- nearly-full bag is noticeable at a glance instead of only by reading numbers.
+local function SetTitleCount(fontString, used, total, searchHits)
+	-- While a search is active the counter reports the matches instead.
+	if searchHits then
+		local cc = E.myClassColor
+		fontString:SetText(format(L["%d results"], searchHits))
+		fontString:SetTextColor(cc.r, cc.g, cc.b)
+		return
+	end
+
+	fontString:SetText(format("%d / %d %s", used, total, L["Items"]))
+
+	local ratio = total > 0 and used / total or 0
+	if ratio >= 0.95 then
+		fontString:SetTextColor(1, 0.25, 0.25)
+	elseif ratio >= 0.8 then
+		fontString:SetTextColor(1, 0.82, 0.2)
+	else
+		fontString:SetTextColor(1, 1, 1)
+	end
+end
+
+-- nil when no search is active. Relies on the native item-search filter
+-- having just been applied by this refresh's item collection pass.
+local function CountSearchHits(bagIDList)
+	if not (module.searchText and module.searchText ~= "") then
+		return nil
+	end
+
+	local hits = 0
+	for _, bagID in ipairs(bagIDList) do
+		for slotID = 1, C_Container_GetContainerNumSlots(bagID) do
+			local info = C_Container_GetContainerItemInfo(bagID, slotID)
+			if info and info.iconFileID and not info.isFiltered then
+				hits = hits + 1
+			end
+		end
+	end
+	return hits
 end
 
 local function SetCategoryIcon(tex, cat)
@@ -503,6 +564,13 @@ local function Slot_OnLeave()
 	end
 end
 
+-- Drives the pulsing "new item" glow, same technique as ElvUI's own bags
+-- (one shared fade animation per top-level frame, alternating its target
+-- alpha between 0 and 1 on every finish instead of a one-shot fade).
+local function NewItemGlowOnFinished(self)
+	self:SetChange(self:GetChange() == 1 and 0 or 1)
+end
+
 -- Bag and Bank/Warband are two independent top-level frames that can both be
 -- shown at once (opening the bank auto-shows the bags too, see OnBankOpened),
 -- so their pooled slot/header/sub-header/sidebar-row objects can't share one
@@ -530,6 +598,11 @@ local function CreateSlotPoolFor(namePrefix, getContentChild, getOwnerFrame)
 	-- Blizzard's native button chrome (the slot-frame art behind the icon);
 	-- we draw our own flat border via SetTemplate instead, same as ElvUI.
 	btn:SetNormalTexture(E.ClearTexture)
+
+	-- Same flat hover/pressed overlay ElvUI's own bag slots get; the hover
+	-- tint is applied per refresh in UpdateSlotVisual so option changes take
+	-- effect on already-pooled buttons.
+	pcall(btn.StyleButton, btn)
 
 	-- Blizzard's own native border square; we draw quality color via
 	-- SetTemplate/SetItemButtonQuality ourselves, same as ElvUI's own bags.
@@ -635,6 +708,29 @@ local function CreateSlotPoolFor(namePrefix, getContentChild, getOwnerFrame)
 	-- (bags or bank) this particular button actually belongs to.
 	btn.ownerFrame = getOwnerFrame()
 
+	-- Pulsing glow for newly picked-up items (entry.isNew - the same flag
+	-- Recent Items uses), shown/colored in UpdateSlotVisual. Reuses ElvUI's
+	-- own bag glow texture and its one-shared-animation-per-frame technique
+	-- (cheaper than animating every slot individually, and keeps every glow
+	-- on the same frame pulsing in sync).
+	btn.newItemGlow = btn:CreateTexture(nil, "OVERLAY", nil, 1)
+	btn.newItemGlow:SetTexture(E.Media.Textures.BagNewItemGlow)
+	btn.newItemGlow:SetInside()
+	btn.newItemGlow:Hide()
+
+	local ownerFrame = btn.ownerFrame
+	if not ownerFrame.NewItemGlow then
+		ownerFrame.NewItemGlow = CreateAnimationGroup(ownerFrame)
+		ownerFrame.NewItemGlow:SetLooping(true)
+
+		ownerFrame.NewItemGlow.Fade = ownerFrame.NewItemGlow:CreateAnimation("fade")
+		ownerFrame.NewItemGlow.Fade:SetDuration(0.7)
+		ownerFrame.NewItemGlow.Fade:SetChange(0)
+		ownerFrame.NewItemGlow.Fade:SetEasing("in")
+		ownerFrame.NewItemGlow.Fade:SetScript("OnFinished", NewItemGlowOnFinished)
+	end
+	ownerFrame.NewItemGlow.Fade:AddChild(btn.newItemGlow)
+
 	-- Same numeric cooldown-text/swipe-color treatment ElvUI's own bag slots
 	-- get, driven by the user's existing ElvUI > Cooldown > Bags settings.
 	-- RegisterCooldown is required, not automatic - ElvUI only applies its
@@ -664,6 +760,96 @@ local function CreateSlotPoolFor(namePrefix, getContentChild, getOwnerFrame)
 	end
 
 	return { Acquire = AcquireSlot, Release = ReleaseSlotsFrom }
+end
+
+-------------------------------------------------------------------------------
+--  Category placeholder slots ("+"/empty slots after a category's real
+--  items - drag an item onto one to assign it to that category, or pin it
+--  for the Pinned section, without physically moving it in the bag)
+-------------------------------------------------------------------------------
+local function CreatePlaceholderPoolFor(getContentChild)
+	local placeholderPool = {}
+
+	local function OnPlaceholderDrop(self)
+		if not (CursorHasItem() and self.onAssign) then
+			return
+		end
+
+		local kind, itemID = GetCursorInfo()
+		if kind == "item" and itemID then
+			ClearCursor()
+			self.onAssign(itemID)
+		end
+	end
+
+	-- Every placeholder in a row accepts a drop (not just the visible "+"
+	-- one), so all of them get the same hover feedback - a highlight plus a
+	-- tooltip explaining what dropping an item here actually does, set fresh
+	-- per-render in RenderCategorySections alongside onAssign.
+	local function OnPlaceholderEnter(self)
+		if GameTooltip:IsForbidden() or not self.tooltipText then
+			return
+		end
+
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:AddLine(self.tooltipText, 1, 1, 1, true)
+		GameTooltip:Show()
+	end
+
+	local function OnPlaceholderLeave()
+		GameTooltip_Hide()
+	end
+
+	local function CreatePlaceholder(index)
+		local btn = CreateFrame("Button", nil, getContentChild())
+		-- Same look as a real item slot (border/backdrop created once here);
+		-- "transparent" for the filler slots is done via plain frame alpha
+		-- below instead of ElvUI's "Transparent" template - that template's
+		-- fill color comes from the user's own configurable ElvUI backdrop
+		-- fade color, which can end up looking just as opaque as normal
+		-- depending on their settings. Alpha is ours to control outright.
+		local ok = pcall(btn.SetTemplate, btn, nil, true)
+		if not ok then
+			pcall(btn.SetTemplate, btn)
+		end
+		btn:EnableMouse(true)
+		btn:SetHighlightTexture([[Interface\QuestFrame\UI-QuestTitleHighlight]], "ADD")
+
+		btn.plusIcon = btn:CreateTexture(nil, "OVERLAY")
+		btn.plusIcon:SetPoint("CENTER")
+		btn.plusIcon:SetSize(14, 14)
+		btn.plusIcon:SetTexture(E.Media.Textures.Plus)
+		local cc = E.myClassColor
+		btn.plusIcon:SetVertexColor(cc.r, cc.g, cc.b)
+		btn.plusIcon:Hide()
+
+		btn:SetScript("OnReceiveDrag", OnPlaceholderDrop)
+		btn:SetScript("OnMouseUp", OnPlaceholderDrop)
+		btn:SetScript("OnEnter", OnPlaceholderEnter)
+		btn:SetScript("OnLeave", OnPlaceholderLeave)
+
+		placeholderPool[index] = btn
+		return btn
+	end
+
+	local function AcquirePlaceholder(index)
+		local btn = placeholderPool[index]
+		if not btn then
+			btn = CreatePlaceholder(index)
+			placeholderPool[index] = btn
+		end
+
+		btn:Show()
+		return btn
+	end
+
+	local function ReleasePlaceholdersFrom(startIndex)
+		for i = startIndex, #placeholderPool do
+			placeholderPool[i]:Hide()
+		end
+	end
+
+	return { Acquire = AcquirePlaceholder, Release = ReleasePlaceholdersFrom }
 end
 
 -- Pawn's own upgrade check can return nil ("not enough data yet", e.g. right
@@ -852,6 +1038,26 @@ local function UpdateSlotVisual(btn, entry)
 	btn.JunkIcon:SetSize(module.db.itemSize * 0.5, module.db.itemSize * 0.5)
 	btn.JunkIcon:SetShown(entry.isJunk and true or false)
 
+	local fx = module.db.effects
+	local showGlow = entry.isNew and fx.newItemGlow
+	btn.newItemGlow:SetShown(showGlow and true or false)
+	if showGlow then
+		btn.newItemGlow:SetVertexColor(r, g, b)
+		if not btn.ownerFrame.NewItemGlow:IsPlaying() then
+			btn.ownerFrame.NewItemGlow:Play()
+		end
+	end
+
+	if btn.hover then
+		if fx.hoverClassColor then
+			local cc = E.myClassColor
+			btn.hover:SetColorTexture(cc.r, cc.g, cc.b, 0.3)
+		else
+			local hc = fx.hoverColor
+			btn.hover:SetColorTexture(hc.r, hc.g, hc.b, 0.3)
+		end
+	end
+
 	UpdateUpgradeIcon(btn)
 	UpdateEquipSetIcon(btn, entry)
 
@@ -868,12 +1074,47 @@ end
 -------------------------------------------------------------------------------
 --  Category headers
 -------------------------------------------------------------------------------
+-- Clicking a section header folds/unfolds that section's items (state is
+-- per section key, saved in db.collapsedSections, shared by both frames).
+-- Ignored while a search is active - matches must always be visible.
+local function Header_OnClick(self)
+	if self.sectionKey == nil or self.searching then
+		return
+	end
+
+	local collapsed = module.db.collapsedSections
+	collapsed[self.sectionKey] = (not collapsed[self.sectionKey]) or nil
+
+	if self.refresh then
+		self.refresh()
+	end
+end
+
+local function Header_OnEnter(self)
+	local cc = E.myClassColor
+	self.arrow:SetVertexColor(cc.r, cc.g, cc.b)
+end
+
+local function Header_OnLeave(self)
+	self.arrow:SetVertexColor(0.6, 0.6, 0.6)
+end
+
 local function CreateHeaderPoolFor(getContentChild)
 	local headerPool = {}
 
 	local function CreateHeader(index)
-		local header = CreateFrame("Frame", nil, getContentChild())
+		local header = CreateFrame("Button", nil, getContentChild())
 		header:SetHeight(22)
+		header:RegisterForClicks("LeftButtonUp")
+		header:SetScript("OnClick", Header_OnClick)
+		header:SetScript("OnEnter", Header_OnEnter)
+		header:SetScript("OnLeave", Header_OnLeave)
+
+		header.arrow = header:CreateTexture(nil, "OVERLAY")
+		header.arrow:SetSize(12, 12)
+		header.arrow:Point("RIGHT", -2, 0)
+		header.arrow:SetTexture(E.Media.Textures.ArrowUp)
+		header.arrow:SetVertexColor(0.6, 0.6, 0.6)
 
 		header.icon = header:CreateTexture(nil, "ARTWORK")
 		header.icon:SetSize(16, 16)
@@ -883,13 +1124,32 @@ local function CreateHeaderPoolFor(getContentChild)
 		header.text:FontTemplate()
 		header.text:Point("LEFT", header.icon, "RIGHT", 6, 0)
 
+		-- Divider filling the rest of the header row after the name/count, so
+		-- the header reads as a full-width rule instead of stopping short
+		-- wherever the text happens to end. Class-colored to match the other
+		-- accent bits (selected sidebar row, view-mode bar) instead of a
+		-- flat white line.
+		local cc = E.myClassColor
+		header.line = header:CreateTexture(nil, "ARTWORK")
+		header.line:SetColorTexture(cc.r, cc.g, cc.b, 0.35)
+		header.line:Height(1)
+		header.line:Point("LEFT", header.text, "RIGHT", 8, 0)
+		header.line:Point("RIGHT", header.arrow, "LEFT", -6, 0)
+
 		header.clearButton = CreateFrame("Button", nil, header)
 		header.clearButton:Size(14)
-		header.clearButton:Point("RIGHT", -2, 0)
+		header.clearButton:Point("RIGHT", header.arrow, "LEFT", -6, 0)
 		pcall(header.clearButton.SetTemplate, header.clearButton)
 		header.clearButton.tex = header.clearButton:CreateTexture(nil, "OVERLAY")
 		header.clearButton.tex:SetAllPoints()
 		header.clearButton.tex:SetTexture(E.Media.Textures.Close)
+		header.clearButton:SetScript("OnEnter", function(self)
+			local cc = E.myClassColor
+			self.tex:SetVertexColor(cc.r, cc.g, cc.b)
+		end)
+		header.clearButton:SetScript("OnLeave", function(self)
+			self.tex:SetVertexColor(1, 1, 1)
+		end)
 		header.clearButton:Hide()
 
 		headerPool[index] = header
@@ -973,7 +1233,10 @@ local function Sidebar_OnClick(self, mouseButton)
 
 	if mouseButton == "LeftButton" then
 		module:ScrollToCategory(self.catKey, self.ownerFrame, self.getOffsets and self.getOffsets())
-	elseif mouseButton == "RightButton" and (self.isUser or self.isGroup or self.isGroupMember) then
+	elseif
+		mouseButton == "RightButton"
+		and (self.isUser or self.isGroup or self.isGroupMember or not self.isPinnedOrRecent)
+	then
 		module:OpenCategoryContextMenu(self)
 	end
 end
@@ -1069,6 +1332,7 @@ local function CreateSidebarPoolFor(getSidebarChild, getOwnerFrame, getOffsets)
 
 		row.count = row:CreateFontString(nil, "OVERLAY")
 		row.count:FontTemplate()
+		row.count:SetTextColor(0.6, 0.6, 0.6)
 		row.count:Point("RIGHT", -4, 0)
 
 		-- Sidebar_OnClick needs to know which top-level frame's mainScroll to
@@ -1154,6 +1418,7 @@ end
 -- can't be shared between the two.
 local function CreatePoolSet(namePrefix, getContentChild, getSidebarChild, getOwnerFrame, getOffsets)
 	local slot = CreateSlotPoolFor(namePrefix, getContentChild, getOwnerFrame)
+	local placeholder = CreatePlaceholderPoolFor(getContentChild)
 	local header = CreateHeaderPoolFor(getContentChild)
 	local subHeader = CreateSubHeaderPoolFor(getContentChild)
 	local sidebar = CreateSidebarPoolFor(getSidebarChild, getOwnerFrame, getOffsets)
@@ -1161,6 +1426,8 @@ local function CreatePoolSet(namePrefix, getContentChild, getSidebarChild, getOw
 	return {
 		AcquireSlot = slot.Acquire,
 		ReleaseSlotsFrom = slot.Release,
+		AcquirePlaceholder = placeholder.Acquire,
+		ReleasePlaceholdersFrom = placeholder.Release,
 		AcquireHeader = header.Acquire,
 		ReleaseHeadersFrom = header.Release,
 		AcquireSubHeader = subHeader.Acquire,
@@ -1209,6 +1476,9 @@ function module:ConstructFrame()
 	pcall(f.SetTemplate, f, "Transparent")
 	WS:CreateShadow(f)
 	f:Hide()
+	f:SetScript("OnShow", function(self)
+		module:FadeInFrame(self)
+	end)
 	f:SetScript("OnHide", function()
 		module:OnFrameHidden()
 	end)
@@ -1261,6 +1531,10 @@ function module:ConstructFrame()
 		btn:Size(20)
 		pcall(btn.SetTemplate, btn)
 		pcall(btn.StyleButton, btn, nil, true)
+		if btn.hover then
+			local cc = E.myClassColor
+			btn.hover:SetColorTexture(cc.r, cc.g, cc.b, 0.3)
+		end
 
 		btn.tex = btn:CreateTexture(nil, "OVERLAY")
 		btn.tex:SetInside()
@@ -1445,6 +1719,7 @@ function module:ConstructFrame()
 
 		row.count = row:CreateFontString(nil, "OVERLAY")
 		row.count:FontTemplate()
+		row.count:SetTextColor(0.6, 0.6, 0.6)
 		row.count:Point("RIGHT", -4, 0)
 
 		row.viewModeKey = def.key
@@ -1483,6 +1758,7 @@ function module:ConstructFrame()
 
 	f.pinnedRow.count = f.pinnedRow:CreateFontString(nil, "OVERLAY")
 	f.pinnedRow.count:FontTemplate()
+	f.pinnedRow.count:SetTextColor(0.6, 0.6, 0.6)
 	f.pinnedRow.count:Point("RIGHT", -4, 0)
 
 	f.pinnedRow:SetScript("OnClick", function()
@@ -1530,6 +1806,16 @@ function module:ConstructFrame()
 	f.contentChild:Height(1)
 	f.mainScroll:SetScrollChild(f.contentChild)
 	module.contentChild = f.contentChild
+
+	-- Shown when a search/category filter leaves nothing to display - parented
+	-- to the scroll frame itself (not the content child, which shrinks to a
+	-- 1px height when empty) so it stays centered in the visible viewport.
+	f.emptyText = f.mainScroll:CreateFontString(nil, "OVERLAY")
+	f.emptyText:FontTemplate(nil, 14)
+	f.emptyText:SetTextColor(0.6, 0.6, 0.6)
+	f.emptyText:Point("CENTER")
+	f.emptyText:SetText(L["No items found."])
+	f.emptyText:Hide()
 
 	-- Footer
 	f.footer = CreateFrame("Frame", nil, f)
@@ -2640,8 +2926,9 @@ local function RenderCategorySections(ctx, sections)
 	-- shortcut's count stuck at its previous, now-stale value.
 	ctx.pinnedRow.count:SetText(0)
 
-	local slotIndex, headerIndex, subHeaderIndex, sidebarIndex = 0, 0, 0, 0
+	local slotIndex, headerIndex, subHeaderIndex, sidebarIndex, placeholderIndex = 0, 0, 0, 0, 0
 	local y = 0
+	local searching = module.searchText and module.searchText ~= ""
 
 	for _, section in ipairs(sections) do
 		ctx.offsets[section.key] = y
@@ -2652,8 +2939,15 @@ local function RenderCategorySections(ctx, sections)
 		header:ClearAllPoints()
 		header:Point("TOPLEFT", ctx.contentChild, "TOPLEFT", 0, -y)
 		header:Point("TOPRIGHT", ctx.contentChild, "TOPRIGHT", 0, -y)
-		header.text:SetText(format("%s (%d)", section.name, #section.items))
+		header.text:SetText(format("%s |cff999999(%d)|r", section.name, #section.items))
 		SetCategoryIcon(header.icon, section)
+
+		local collapsed = not searching and db.collapsedSections[section.key] and true or false
+		header.sectionKey = section.key
+		header.refresh = ctx.refresh
+		header.searching = searching
+		header.arrow:SetShown(not searching)
+		header.arrow:SetRotation(collapsed and S.ArrowRotation.right or S.ArrowRotation.down)
 
 		if section.showClear then
 			header.clearButton:Show()
@@ -2728,17 +3022,81 @@ local function RenderCategorySections(ctx, sections)
 			end
 		end
 
-		if #section.items > 0 then
-			local col = 0
-			local rowStartY = y
+		local col = 0
+		local rowStartY = y
+
+		-- "+"/empty slots after a group of real items - drag an item onto
+		-- one to assign it to this category (or pin it, for Pinned), without
+		-- physically moving it in the bag. Only sections where "assign" has
+		-- an unambiguous target get these: not Recent (auto-computed from
+		-- new-item detection, nothing to assign to), not a group (which
+		-- member would it even go to?), not a physical-bag/flat-All-Items
+		-- view section (those are just alternate arrangements of the same
+		-- items, not classification targets). Computed up front so it can
+		-- also close out each expansion/equipment-set sub-header's own row
+		-- below, not just the section's very last one.
+		local assignHandler, placeholderTooltip
+		if section.isPinned then
+			assignHandler = function(itemID)
+				if not module:IsItemPinned(itemID) then
+					module:TogglePinned(itemID)
+				end
+				ctx.refresh()
+			end
+			placeholderTooltip = L["Drag an item here to pin it."]
+		elseif not (section.isRecent or section.isGroup or section.isBagSection or section.key == module.AllItemsCategory.key) then
+			local categoryKey = section.key
+			assignHandler = function(itemID)
+				module:AssignItemToCategory(itemID, categoryKey)
+				ctx.refresh()
+			end
+			placeholderTooltip = format(L["Drag an item here to assign it to %s."], section.name)
+		end
+
+		local function PadRowWithPlaceholders()
+			if not assignHandler then
+				return
+			end
+
+			local placeholderCount = (col == 0) and columns or (columns - col)
+			for i = 1, placeholderCount do
+				placeholderIndex = placeholderIndex + 1
+				local ph = pools.AcquirePlaceholder(placeholderIndex)
+				ph:ClearAllPoints()
+				ph:Size(db.itemSize)
+				ph:Point("TOPLEFT", ctx.contentChild, "TOPLEFT", col * (db.itemSize + db.itemSpacingH), -rowStartY)
+				ph.onAssign = assignHandler
+				ph.tooltipText = placeholderTooltip
+				local isAddSlot = i == 1
+				ph.plusIcon:SetShown(isAddSlot)
+				-- All of these accept a drop, but only the "+" one should
+				-- visually read as an actual button - the rest stay
+				-- transparent, purely there to fill the row out to full width.
+				ph:SetAlpha(isAddSlot and 1 or db.effects.placeholderAlpha)
+
+				col = col + 1
+				if col >= columns then
+					col = 0
+					rowStartY = rowStartY + db.itemSize + db.itemSpacingV
+				end
+			end
+		end
+
+		if not collapsed and #section.items > 0 then
 			local subHeaders = section.subHeaders
 			local nextSubHeader = subHeaders and subHeaders[1]
 			local nextSubHeaderPos = 2
 
 			for itemIndex, entry in ipairs(section.items) do
 				-- A subgroup (expansion/equipment-set name) always starts its
-				-- own row, with a small indented header above its items.
+				-- own row, with a small indented header above its items -
+				-- close out the previous group's row with placeholders first
+				-- (a no-op the very first time, since col is still 0 then).
 				if nextSubHeader and nextSubHeader.index == itemIndex then
+					if itemIndex > 1 then
+						PadRowWithPlaceholders()
+					end
+
 					if col > 0 then
 						col = 0
 						rowStartY = rowStartY + db.itemSize + db.itemSpacingV
@@ -2749,7 +3107,7 @@ local function RenderCategorySections(ctx, sections)
 					subHeader:ClearAllPoints()
 					subHeader:Point("TOPLEFT", ctx.contentChild, "TOPLEFT", 6, -rowStartY)
 					subHeader:Point("TOPRIGHT", ctx.contentChild, "TOPRIGHT", -6, -rowStartY)
-					subHeader.text:SetText(format("%s (%d)", nextSubHeader.name, nextSubHeader.count))
+					subHeader.text:SetText(format("%s |cff999999(%d)|r", nextSubHeader.name, nextSubHeader.count))
 					rowStartY = rowStartY + subHeader:GetHeight() + 2
 
 					nextSubHeader = subHeaders[nextSubHeaderPos]
@@ -2770,23 +3128,34 @@ local function RenderCategorySections(ctx, sections)
 					rowStartY = rowStartY + db.itemSize + db.itemSpacingV
 				end
 			end
-
-			if col > 0 then
-				rowStartY = rowStartY + db.itemSize + db.itemSpacingV
-			end
-			y = rowStartY
 		end
+
+		-- Closes out either the section's only group (no sub-headers) or the
+		-- last sub-header group (earlier ones were already closed above).
+		if not collapsed then
+			PadRowWithPlaceholders()
+		end
+
+		if col > 0 then
+			rowStartY = rowStartY + db.itemSize + db.itemSpacingV
+		end
+		y = rowStartY
 
 		y = y + db.sectionSpacing
 	end
 
 	pools.ReleaseSlotsFrom(slotIndex + 1)
+	pools.ReleasePlaceholdersFrom(placeholderIndex + 1)
 	pools.ReleaseHeadersFrom(headerIndex + 1)
 	pools.ReleaseSubHeadersFrom(subHeaderIndex + 1)
 	pools.ReleaseSidebarRowsFrom(sidebarIndex + 1)
 
 	ctx.sidebarChild:Height(math.max(1, (ctx.sidebarBaseY or 0) + sidebarIndex * db.sidebarRowHeight))
 	ctx.contentChild:Height(math.max(1, y))
+
+	if ctx.emptyText then
+		ctx.emptyText:SetShown(#sections == 0)
+	end
 end
 
 module.RenderCategorySections = RenderCategorySections
@@ -2866,13 +3235,14 @@ function module:RefreshCategoryFrame()
 		offsets = module.categoryOffsets,
 		width = db.width,
 		sidebarWidth = sidebarWidth,
+		emptyText = f.emptyText,
 		refresh = function()
 			module:RefreshCategoryFrame()
 		end,
 	}, sections)
 
 	f.titleText:SetText(L["Inventory"])
-	f.titleCountText:SetText(format("%d / %d %s", usedSlots, totalSlots, L["Items"]))
+	SetTitleCount(f.titleCountText, usedSlots, totalSlots, CountSearchHits(BAG_IDS))
 
 	module:UpdateFooter()
 end
@@ -3263,19 +3633,50 @@ function module:OpenCategoryContextMenu(row)
 		return
 	end
 
+	if row.isUser then
+		_G.MenuUtil.CreateContextMenu(row, function(_, rootDescription)
+			rootDescription:CreateButton(L["Rename"], function()
+				StaticPopup_Show("MER_BAGCATEGORIES_RENAME", nil, nil, { key = key })
+			end)
+
+			rootDescription:CreateButton(L["Change Icon"], function()
+				StaticPopup_Show("MER_BAGCATEGORIES_ICON", nil, nil, { key = key })
+			end)
+
+			rootDescription:CreateButton(L["Delete"], function()
+				module:RemoveUserCategory(key)
+				module:RefreshCategoryFrame()
+			end)
+		end)
+
+		return
+	end
+
+	-- A default (built-in) category: no Change Icon/Delete (nothing to
+	-- delete, and default categories don't support a custom icon the way
+	-- user categories do), but Rename/Hide-in-All-Items are exactly as
+	-- meaningful here as they already are for a group - both are stored
+	-- generically by category key, not specially for groups.
+	local db = module.db
 	_G.MenuUtil.CreateContextMenu(row, function(_, rootDescription)
 		rootDescription:CreateButton(L["Rename"], function()
 			StaticPopup_Show("MER_BAGCATEGORIES_RENAME", nil, nil, { key = key })
 		end)
 
-		rootDescription:CreateButton(L["Change Icon"], function()
-			StaticPopup_Show("MER_BAGCATEGORIES_ICON", nil, nil, { key = key })
-		end)
+		if db.categoryNameOverrides and db.categoryNameOverrides[key] then
+			rootDescription:CreateButton(L["Reset Name"], function()
+				module:ResetCategoryName(key)
+				module:RefreshCategoryFrame()
+			end)
+		end
 
-		rootDescription:CreateButton(L["Delete"], function()
-			module:RemoveUserCategory(key)
-			module:RefreshCategoryFrame()
-		end)
+		rootDescription:CreateButton(
+			module:IsHiddenFromAllItems(key) and L["Show in All Items"] or L["Hide in All Items"],
+			function()
+				module:SetHiddenFromAllItems(key, not module:IsHiddenFromAllItems(key))
+				module:RefreshCategoryFrame()
+			end
+		)
 	end)
 end
 
@@ -3393,6 +3794,53 @@ end
 -- either from insecure code throws ADDON_ACTION_BLOCKED. Guarded here so
 -- every caller (hooks, the close button, the mover) is covered; whatever
 -- shown/hidden state we're in when combat starts just stays frozen.
+-- Shared by both top-level frames (bag + bank). Fade-in runs from OnShow; the
+-- fade-out has to defer the real Hide() until the fade finishes, so every
+-- hide path goes through FadeOutHide instead of calling :Hide() directly.
+function module:FadeInFrame(f)
+	local fx = module.db.effects
+	local startAlpha = f.fadingOut and f:GetAlpha() or 0
+
+	-- A fade-out cut short by a re-open must not fire its stale Hide callback
+	-- when the new fade-in finishes.
+	f.fadingOut = nil
+	if f.FadeObject then
+		f.FadeObject.finishedFunc = nil
+	end
+
+	if fx.fade then
+		E:UIFrameFadeIn(f, fx.fadeDuration, startAlpha, 1)
+	else
+		E:UIFrameFadeRemoveFrame(f)
+		f:SetAlpha(1)
+	end
+end
+
+function module:FadeOutHide(f)
+	local fx = module.db.effects
+	if not fx.fade then
+		f:Hide()
+		return
+	end
+
+	if f.fadingOut then
+		return
+	end
+
+	f.fadingOut = true
+	E:UIFrameFadeOut(f, fx.fadeDuration, f:GetAlpha(), 0)
+	f.FadeObject.finishedFunc = function()
+		f.fadingOut = nil
+		-- Hide() on these frames is combat-protected (secure slot buttons), so
+		-- if combat started mid-fade just restore the frame instead.
+		if InCombatLockdown() then
+			f:SetAlpha(1)
+			return
+		end
+		f:Hide()
+	end
+end
+
 function module:ShowCategoryFrame()
 	if InCombatLockdown() then
 		return
@@ -3402,6 +3850,9 @@ function module:ShowCategoryFrame()
 	HideElvUIBagFrame()
 
 	module.frame:Show()
+	if module.frame.fadingOut then
+		module:FadeInFrame(module.frame)
+	end
 	module:RegisterBagEventsFor("bag")
 	module:RefreshCategoryFrame()
 	PlaySound(SOUNDKIT.IG_BACKPACK_OPEN or 862)
@@ -3413,7 +3864,7 @@ function module:HideCategoryFrame()
 	end
 
 	if module.frame and module.frame:IsShown() then
-		module.frame:Hide()
+		module:FadeOutHide(module.frame)
 	end
 end
 
@@ -3440,6 +3891,10 @@ function module:OnFrameHidden()
 		CloseBag(i)
 	end
 	CloseBackpack()
+
+	if module.frame.NewItemGlow then
+		module.frame.NewItemGlow:Stop()
+	end
 
 	-- Clear any pending "the bank opened this bag frame automatically" state
 	-- on every hide path (manual close button, /reload, etc.) so a later,
@@ -3718,5 +4173,7 @@ module.SetCategoryIcon = SetCategoryIcon
 module.VIEW_MODE_ROW_HEIGHT = VIEW_MODE_ROW_HEIGHT
 module.COLLAPSED_SIDEBAR_WIDTH = COLLAPSED_SIDEBAR_WIDTH
 module.SkinScrollBar = SkinScrollBar
+module.SetTitleCount = SetTitleCount
+module.CountSearchHits = CountSearchHits
 
 MER:RegisterModule(module:GetName())
